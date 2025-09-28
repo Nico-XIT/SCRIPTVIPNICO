@@ -1,6 +1,7 @@
 --// Servicios
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage") -- Añadido para Desync
 
 local player = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
@@ -50,7 +51,7 @@ toggleUI.TextColor3 = Color3.fromRGB(255, 255, 255)
 local toggleUICorner = Instance.new("UICorner", toggleUI) toggleUICorner.CornerRadius = UDim.new(1,0)
 
 local frame = Instance.new("Frame", gui)
-frame.Size = UDim2.new(0, 260, 0, 180) -- Reducido a su tamaño original
+frame.Size = UDim2.new(0, 260, 0, 228) -- Altura aumentada para el nuevo botón
 frame.Position = UDim2.new(0, 64, 0, 64)
 frame.BackgroundColor3 = Color3.fromRGB(18, 22, 28)
 frame.BorderSizePixel = 0
@@ -157,20 +158,40 @@ platformGradient.Color = ColorSequence.new{
 }
 platformGradient.Rotation = 90
 
+--// NUEVO BOTÓN: DESYNC
+local btnDesync = Instance.new("TextButton", frame)
+btnDesync.Size = UDim2.new(1, -20, 0, 42)
+btnDesync.Position = UDim2.new(0, 10, 0, 174) -- Posición debajo del botón de plataforma
+btnDesync.Text = "ACTIVAR DESYNC"
+btnDesync.Font = Enum.Font.GothamBold
+btnDesync.TextSize = 13
+btnDesync.TextColor3 = Color3.new(1,1,1)
+btnDesync.BackgroundColor3 = Color3.fromRGB(140, 90, 220) -- Color morado
+btnDesync.BorderSizePixel = 0
+local btnDesyncCorner = Instance.new("UICorner", btnDesync) btnDesyncCorner.CornerRadius = UDim.new(0, 12)
+local desyncGradient = Instance.new("UIGradient", btnDesync)
+desyncGradient.Color = ColorSequence.new{
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(140, 90, 220)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(160, 110, 240)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(140, 90, 220))
+}
+desyncGradient.Rotation = 90
+
+
 local uiOpen = true
 local function setUI(open) uiOpen = open; frame.Visible = open end
 toggleUI.MouseButton1Click:Connect(function() setUI(not uiOpen) end)
 
 local function toggleInterface()
     if isMinimized then
-        frame:TweenSize(UDim2.new(0, 260, 0, 180), "Out", "Quart", 0.25, true)
+        frame:TweenSize(UDim2.new(0, 260, 0, 228), "Out", "Quart", 0.25, true) -- Altura ajustada
         toggleBtn.Text = "−"
-        statusFrame.Visible, btnMark.Visible, btnPlatform.Visible = true, true, true
+        statusFrame.Visible, btnMark.Visible, btnPlatform.Visible, btnDesync.Visible = true, true, true, true -- Botón Desync añadido
         isMinimized = false
     else
         frame:TweenSize(UDim2.new(0, 260, 0, 44), "Out", "Quart", 0.25, true)
         toggleBtn.Text = "+"
-        statusFrame.Visible, btnMark.Visible, btnPlatform.Visible = false, false, false
+        statusFrame.Visible, btnMark.Visible, btnPlatform.Visible, btnDesync.Visible = false, false, false, false -- Botón Desync añadido
         isMinimized = true
     end
 end
@@ -499,6 +520,68 @@ local function startSCPEffects()
     end
 end
 
+--==================== Lógica Desync (Integrada) ====================--
+local desyncActive = false
+
+local function enableMobileDesync()
+    local success, err = pcall(function()
+        local backpack = player:WaitForChild("Backpack")
+        local char = player.Character or player.CharacterAdded:Wait()
+        local humanoid = char:WaitForChild("Humanoid")
+        
+        local packages = ReplicatedStorage:WaitForChild("Packages", 5)
+        if not packages then warn("❌ Packages no encontrado") return false end
+        
+        local netFolder = packages:WaitForChild("Net", 5)
+        if not netFolder then warn("❌ Net folder no encontrado") return false end
+        
+        local useItemRemote = netFolder:WaitForChild("RE/UseItem", 5)
+        local teleportRemote = netFolder:WaitForChild("RE/QuantumCloner/OnTeleport", 5)
+        if not useItemRemote or not teleportRemote then warn("❌ Remotos no encontrados") return false end
+
+        -- Procurar ferramenta
+        local toolNames = {"Quantum Cloner", "Brainrot", "brainrot"}
+        local tool
+        for _, toolName in ipairs(toolNames) do
+            tool = backpack:FindFirstChild(toolName) or char:FindFirstChild(toolName)
+            if tool then break end
+        end
+        if not tool then
+            for _, item in ipairs(backpack:GetChildren()) do
+                if item:IsA("Tool") then tool=item break end
+            end
+        end
+
+        if tool and tool.Parent==backpack then
+            humanoid:EquipTool(tool)
+            task.wait(0.5)
+        end
+
+        if setfflag then setfflag("WorldStepMax", "-9999999999") end
+        task.wait(0.2)
+        useItemRemote:FireServer()
+        task.wait(1)
+        teleportRemote:FireServer()
+        task.wait(2)
+        if setfflag then setfflag("WorldStepMax", "-1") end
+        updateStatusLabel("✅ Desync activado!")
+        return true
+    end)
+    if not success then
+        warn("❌ Error al activar desync: " .. tostring(err))
+        updateStatusLabel("❌ Error al activar desync.")
+        return false
+    end
+    return success
+end
+
+local function disableMobileDesync()
+    pcall(function()
+        if setfflag then setfflag("WorldStepMax", "-1") end
+        updateStatusLabel("❌ Desync desactivado.")
+    end)
+end
+
 --==================== Scanner principal ====================--
 local function markBestBrainrot()
     if status then status.Text = "Buscando brainrots..." end
@@ -511,6 +594,7 @@ end
 
 --==================== Handlers ====================--
 btnMark.MouseButton1Click:Connect(markBestBrainrot)
+
 btnPlatform.MouseButton1Click:Connect(function()
     if platformState == "none" then
         startPlatform()
@@ -521,10 +605,33 @@ btnPlatform.MouseButton1Click:Connect(function()
     end
 end)
 
+btnDesync.MouseButton1Click:Connect(function()
+    desyncActive = not desyncActive
+    if desyncActive then
+        local success = enableMobileDesync()
+        if success then
+            btnDesync.BackgroundColor3 = Color3.fromRGB(255, 215, 0) -- Amarillo dorado
+            btnDesync.Text = "DESYNC ACTIVADO"
+            desyncGradient.Enabled = false
+        else
+            desyncActive = false
+            btnDesync.BackgroundColor3 = Color3.fromRGB(140, 90, 220) -- Morado (original)
+            btnDesync.Text = "ACTIVAR DESYNC"
+            desyncGradient.Enabled = true
+        end
+    else
+        disableMobileDesync()
+        btnDesync.BackgroundColor3 = Color3.fromRGB(140, 90, 220) -- Morado (original)
+        btnDesync.Text = "ACTIVAR DESYNC"
+        desyncGradient.Enabled = true
+    end
+end)
+
 close.MouseButton1Click:Connect(function()
     if currentMarker then currentMarker:Destroy(); currentMarker = nil end
     deletePlatform()
     cleanupSCPEffects() -- Desactiva el SCP al cerrar
+    disableMobileDesync() -- Desactiva el desync al cerrar
     gui:Destroy()
 end)
 
@@ -533,8 +640,8 @@ startSCPEffects()
 print("Brainrot Scanner: HEAD_CLEARANCE=1.6 (para no chocar), SCP activado automáticamente.")
 
 ---
--- Fix para el problema del Brainrot
--- Detecta si el personaje se reinicia y reactiva la plataforma si está activa
+-- Fix para el problema del Brainrot y Desync
+-- Detecta si el personaje se reinicia y reactiva/desactiva cosas
 player.CharacterAdded:Connect(function(newCharacter)
     character = newCharacter
     -- Si la plataforma estaba activa, la reinicia
@@ -542,5 +649,12 @@ player.CharacterAdded:Connect(function(newCharacter)
         deletePlatform() -- Limpia la plataforma anterior
         startPlatform()  -- Inicia una nueva
     end
+    -- Desactiva el Desync si el personaje muere
+    if desyncActive then
+        desyncActive = false
+        disableMobileDesync()
+        btnDesync.BackgroundColor3 = Color3.fromRGB(140, 90, 220)
+        btnDesync.Text = "ACTIVAR DESYNC"
+        desyncGradient.Enabled = true
+    end
 end)
-
