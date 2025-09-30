@@ -1,3 +1,83 @@
+-- ================== CONFIG FIREBASE (TU PROYECTO) ==================
+local PROJECT_ID = "keyyyvalidator"
+local API_KEY    = "AIzaSyBfaE6s4Xf5kb4JqRkelHpnifW8-DoOgQA"
+-- ===================================================================
+
+--==================== HTTP helper ====================--
+local HttpService = game:GetService("HttpService")
+local http
+if syn and syn.request then http = syn.request
+elseif request then http = request
+elseif http_request then http = http_request
+elseif http and http.request then http = http.request
+else error("No hay función HTTP disponible en este ejecutor.") end
+
+--==================== Fecha utils (ISO -> Unix robusto) ====================--
+local function utcOffsetSeconds()
+    local now = os.time()
+    local lt = os.date("*t", now)
+    local ut = os.date("!*t", now)
+    lt.isdst = false; ut.isdst = false
+    return os.difftime(os.time(lt), os.time(ut))
+end
+local __TZ = utcOffsetSeconds()
+
+local function isoToUnix(iso) -- "YYYY-MM-DDTHH:MM:SS(.ms)Z"
+    local y,m,d,H,M,S = string.match(iso, "^(%d+)%-(%d+)%-(%d+)T(%d+):(%d+):(%d+)")
+    if not (y and m and d and H and M and S) then return nil end
+    y,m,d,H,M,S = tonumber(y),tonumber(m),tonumber(d),tonumber(H),tonumber(M),tonumber(S)
+    -- os.time usa hora local; restamos offset para UTC real
+    local local_ts = os.time({year=y, month=m, day=d, hour=H, min=M, sec=S, isdst=false})
+    if not local_ts then return nil end
+    return local_ts - __TZ
+end
+
+--==================== Validación contra Firestore ====================--
+local function validateKeyByDocId(code)
+    if not code or code == "" then
+        return false, "missing_code"
+    end
+    local url = "https://firestore.googleapis.com/v1/projects/"
+        .. PROJECT_ID .. "/databases/(default)/documents/keys/"
+        .. HttpService:UrlEncode(code) .. "?key=" .. API_KEY
+
+    local ok, resp = pcall(function()
+        return http({ Url = url, Method = "GET" })
+    end)
+    if not ok or not resp then
+        return false, "network_error"
+    end
+
+    if resp.StatusCode and resp.StatusCode ~= 200 then
+        if resp.StatusCode == 404 then
+            return false, "not_found"
+        else
+            return false, "http_".. tostring(resp.StatusCode)
+        end
+    end
+
+    local okj, data = pcall(function()
+        return HttpService:JSONDecode(resp.Body)
+    end)
+    if not okj or not data.fields then
+        return false, "not_found"
+    end
+
+    local f = data.fields
+    local isActive  = f.is_active and f.is_active.booleanValue
+    local expiryISO = f.expiry_date and f.expiry_date.timestampValue
+
+    if not isActive then return false, "inactive" end
+    if not expiryISO then return false, "no_expiry_date" end
+
+    local expUnix = isoToUnix(expiryISO)
+    if not expUnix then return false, "bad_expiry_format" end
+    if os.time() >= expUnix then return false, "expired" end
+
+    return true, { expiresAt = expiryISO, ttl = (expUnix - os.time()) }
+end
+
+--==================== TU SCRIPT (con validación primero) ====================--
 --// Servicios
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -6,34 +86,10 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage") -- Añadido para 
 local player = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
 
--- Cámara que “traspasa” paredes
-player.DevCameraOcclusionMode = Enum.DevCameraOcclusionMode.Invisicam
+-------------------- Estado de validación ------------------
+local __KEY_VALIDATED__ = false
 
---// Patterns y util
-local timerPattern1, timerPattern2, numberPattern = "%d+m%s*%d+s", "%d+:%d+", "%d+%.?%d*"
-local multipliers = {B=1_000_000_000,b=1_000_000_000,M=1_000_000,m=1_000_000,K=1_1000,k=1_000}
-local plotsCache, lastPlotScan, PLOT_CACHE_TIME = {}, 0, 2
-local pathAttempts = {
-    {"Base","Spawn","Attachment","AnimalOverhead"},
-    {"Spawn","Attachment","AnimalOverhead"},
-    {"Attachment","AnimalOverhead"},
-    {"AnimalOverhead"}
-}
-
---// Estado global
-local currentMarker = nil
-local currentPlatform = nil
-local platformState = "none" -- "none" | "moving" | "paused"
-local followConn = nil
-local risingHeight = 0
-local raiseSpeed  = 8 -- Velocidad de subida reducida
-local isSCPActive = false
-
--- Parâmetros para detener cuando la cabeza casi toque el techo
-local HEAD_RAY_LENGTH = 20
-local HEAD_CLEARANCE   = 1.6
-
---==================== GUI (paleta nueva) ====================--
+--==================== GUI (MISMA PALETA Y DISEÑO TUYO) ====================--
 local gui = Instance.new("ScreenGui")
 gui.Name = "BrainrotScannerGUI"
 gui.ResetOnSpawn = false
@@ -51,7 +107,7 @@ toggleUI.TextColor3 = Color3.fromRGB(255, 255, 255)
 local toggleUICorner = Instance.new("UICorner", toggleUI) toggleUICorner.CornerRadius = UDim.new(1,0)
 
 local frame = Instance.new("Frame", gui)
-frame.Size = UDim2.new(0, 260, 0, 228) -- Altura aumentada para el nuevo botón
+frame.Size = UDim2.new(0, 260, 0, 228)
 frame.Position = UDim2.new(0, 64, 0, 64)
 frame.BackgroundColor3 = Color3.fromRGB(18, 22, 28)
 frame.BorderSizePixel = 0
@@ -115,7 +171,7 @@ local statusCorner = Instance.new("UICorner", statusFrame) statusCorner.CornerRa
 local status = Instance.new("TextLabel", statusFrame)
 status.Size = UDim2.new(1, -10, 1, 0)
 status.Position = UDim2.new(0, 5, 0, 0)
-status.Text = "Listo para buscar..."
+status.Text = "Validá tu key para comenzar…"
 status.Font = Enum.Font.Gotham
 status.TextColor3 = Color3.fromRGB(185, 195, 205)
 status.TextSize = 12
@@ -158,15 +214,14 @@ platformGradient.Color = ColorSequence.new{
 }
 platformGradient.Rotation = 90
 
---// NUEVO BOTÓN: DESYNC
 local btnDesync = Instance.new("TextButton", frame)
 btnDesync.Size = UDim2.new(1, -20, 0, 42)
-btnDesync.Position = UDim2.new(0, 10, 0, 174) -- Posición debajo del botón de plataforma
+btnDesync.Position = UDim2.new(0, 10, 0, 174)
 btnDesync.Text = "ACTIVAR DESYNC"
 btnDesync.Font = Enum.Font.GothamBold
 btnDesync.TextSize = 13
 btnDesync.TextColor3 = Color3.new(1,1,1)
-btnDesync.BackgroundColor3 = Color3.fromRGB(140, 90, 220) -- Color morado
+btnDesync.BackgroundColor3 = Color3.fromRGB(140, 90, 220)
 btnDesync.BorderSizePixel = 0
 local btnDesyncCorner = Instance.new("UICorner", btnDesync) btnDesyncCorner.CornerRadius = UDim.new(0, 12)
 local desyncGradient = Instance.new("UIGradient", btnDesync)
@@ -177,27 +232,70 @@ desyncGradient.Color = ColorSequence.new{
 }
 desyncGradient.Rotation = 90
 
+-- ---------- VALIDACIÓN UI (MISMO FRAME, MISMOS COLORES) ----------
+local valBox = Instance.new("TextBox", frame)
+valBox.Size = UDim2.new(1, -20, 0, 30)
+valBox.Position = UDim2.new(0, 10, 0, 44)
+valBox.PlaceholderText = "Escribe tu key (ID del doc en /keys)"
+valBox.Text = ""
+valBox.TextSize = 16
+valBox.BackgroundColor3 = Color3.fromRGB(40,40,46)
+valBox.TextColor3 = Color3.new(1,1,1)
 
-local uiOpen = true
-local function setUI(open) uiOpen = open; frame.Visible = open end
-toggleUI.MouseButton1Click:Connect(function() setUI(not uiOpen) end)
+local valBtn = Instance.new("TextButton", frame)
+valBtn.Size = UDim2.new(0, 110, 0, 30)
+valBtn.Position = UDim2.new(0, 10, 0, 80)
+valBtn.Text = "Validar"
+valBtn.TextSize = 16
+valBtn.BackgroundColor3 = Color3.fromRGB(64, 156, 255)
+valBtn.TextColor3 = Color3.new(1,1,1)
 
-local function toggleInterface()
-    if isMinimized then
-        frame:TweenSize(UDim2.new(0, 260, 0, 228), "Out", "Quart", 0.25, true) -- Altura ajustada
-        toggleBtn.Text = "−"
-        statusFrame.Visible, btnMark.Visible, btnPlatform.Visible, btnDesync.Visible = true, true, true, true -- Botón Desync añadido
-        isMinimized = false
-    else
-        frame:TweenSize(UDim2.new(0, 260, 0, 44), "Out", "Quart", 0.25, true)
-        toggleBtn.Text = "+"
-        statusFrame.Visible, btnMark.Visible, btnPlatform.Visible, btnDesync.Visible = false, false, false, false -- Botón Desync añadido
-        isMinimized = true
-    end
+local valStatus = Instance.new("TextLabel", frame)
+valStatus.Size = UDim2.new(1, -130, 0, 30)
+valStatus.Position = UDim2.new(0, 130, 0, 80)
+valStatus.BackgroundTransparency = 1
+valStatus.Text = ""
+valStatus.TextSize = 14
+valStatus.TextColor3 = Color3.new(1,1,1)
+valStatus.TextXAlignment = Enum.TextXAlignment.Left
+
+-- Al inicio: ocultamos tus controles funcionales (sólo se ve validación)
+statusFrame.Visible = false
+btnMark.Visible = false
+btnPlatform.Visible = false
+btnDesync.Visible = false
+
+--==================== LÓGICA TUYA (NO SE EJECUTA HASTA VALIDAR) ====================--
+
+-- Cámara invisicam SOLO tras validación
+local function enableInvisicam()
+    player.DevCameraOcclusionMode = Enum.DevCameraOcclusionMode.Invisicam
 end
-toggleBtn.MouseButton1Click:Connect(toggleInterface)
 
---==================== Lógica util (scanner) ====================--
+-- Patterns y util
+local timerPattern1, timerPattern2, numberPattern = "%d+m%s*%d+s", "%d+:%d+", "%d+%.?%d*"
+local multipliers = {B=1_000_000_000,b=1_000_000_000,M=1_000_000,m=1_000_000,K=1_000,k=1_000}
+local plotsCache, lastPlotScan, PLOT_CACHE_TIME = {}, 0, 2
+local pathAttempts = {
+    {"Base","Spawn","Attachment","AnimalOverhead"},
+    {"Spawn","Attachment","AnimalOverhead"},
+    {"Attachment","AnimalOverhead"},
+    {"AnimalOverhead"}
+}
+
+-- Estado global de tu script
+local currentMarker = nil
+local currentPlatform = nil
+local platformState = "none" -- "none" | "moving" | "paused"
+local followConn = nil
+local risingHeight = 0
+local raiseSpeed  = 8
+local isSCPActive = false
+
+-- Parámetros techo
+local HEAD_RAY_LENGTH = 20
+local HEAD_CLEARANCE   = 1.6
+
 local function updateStatusLabel(text)
     if status and status.Parent then status.Text = tostring(text) end
 end
@@ -259,6 +357,7 @@ local function scanSinglePodium(plot, podiumNumber)
             end
         end
         if not animalPodiums then return nil end
+
         local podium = animalPodiums:FindFirstChild(tostring(podiumNumber))
         if not podium then return nil end
 
@@ -318,7 +417,7 @@ local function fastScan()
     return best
 end
 
---==================== Marcador SIN cilindro ====================--
+--==================== Marcador ====================--
 local function createMarker(position, animalData)
     if currentMarker then currentMarker:Destroy() currentMarker = nil end
     local markerModel = Instance.new("Model"); markerModel.Name = "BrainrotMarker"; markerModel.Parent = workspace
@@ -389,7 +488,7 @@ local function createMarker(position, animalData)
     currentMarker = markerModel
 end
 
---==================== Plataforma (sube hasta PARAR) ====================--
+--==================== Plataforma ====================--
 local function cleanupPlatform()
     if followConn then followConn:Disconnect(); followConn = nil end
     if currentPlatform and currentPlatform.Parent then currentPlatform:Destroy() end
@@ -446,20 +545,15 @@ local function startPlatform()
         local hrpNow = c:FindFirstChild("HumanoidRootPart")
         if not hrpNow then deletePlatform(); return end
 
-        -- Movimiento normal
         local alpha = math.clamp((tick() - t0)/dur, 0, 1)
         local eased = easeOutCubic(alpha)
-        risingHeight += dt * raiseSpeed
+        risingHeight += dt * 8
 
         local baseY = startY + (15 * eased)
-        local targetPos = Vector3.new(
-            hrpNow.Position.X,
-            baseY - 3 + risingHeight,
-            hrpNow.Position.Z
-        )
+        local targetPos = Vector3.new(hrpNow.Position.X, baseY - 3 + risingHeight, hrpNow.Position.Z)
         currentPlatform.Position = currentPlatform.Position:Lerp(targetPos, 0.2)
 
-        -- === DETENCIÓN: cabeza casi pegada al techo, pero con más margen ===
+        -- Detener antes del techo
         local head = c:FindFirstChild("Head") or hrpNow
         local half = (head.Size and head.Size.Y/2) or 1
         local origin = Vector3.new(head.Position.X, head.Position.Y + half + 0.05, head.Position.Z)
@@ -478,12 +572,11 @@ local function startPlatform()
     end)
 end
 
---==================== Lógica SCP ====================--
+--==================== SCP Effects ====================--
 local function addSCPEffect(character)
     if not character or not character.Parent then return end
     local scpTag = "SCPEffectTag"
     if character:FindFirstChild(scpTag) then return end
-
     local highlight = Instance.new("Highlight")
     highlight.Name = scpTag
     highlight.FillTransparency = 1
@@ -514,13 +607,12 @@ local function startSCPEffects()
     for _, p in ipairs(playersList) do
         if p ~= player then
             addSCPEffect(p.Character)
-            -- Asegura que los efectos se apliquen a los nuevos jugadores que se unan
             p.CharacterAdded:Connect(function(char) addSCPEffect(char) end)
         end
     end
 end
 
---==================== Lógica Desync (Integrada) ====================--
+--==================== Desync ====================--
 local desyncActive = false
 
 local function enableMobileDesync()
@@ -528,18 +620,17 @@ local function enableMobileDesync()
         local backpack = player:WaitForChild("Backpack")
         local char = player.Character or player.CharacterAdded:Wait()
         local humanoid = char:WaitForChild("Humanoid")
-        
+
         local packages = ReplicatedStorage:WaitForChild("Packages", 5)
         if not packages then warn("❌ Packages no encontrado") return false end
-        
+
         local netFolder = packages:WaitForChild("Net", 5)
         if not netFolder then warn("❌ Net folder no encontrado") return false end
-        
+
         local useItemRemote = netFolder:WaitForChild("RE/UseItem", 5)
         local teleportRemote = netFolder:WaitForChild("RE/QuantumCloner/OnTeleport", 5)
         if not useItemRemote or not teleportRemote then warn("❌ Remotos no encontrados") return false end
 
-        -- Procurar ferramenta
         local toolNames = {"Quantum Cloner", "Brainrot", "brainrot"}
         local tool
         for _, toolName in ipairs(toolNames) do
@@ -592,10 +683,14 @@ local function markBestBrainrot()
     if status then status.Text = "Marcado: " .. best.displayName .. " (" .. best.generation .. ")" end
 end
 
---==================== Handlers ====================--
-btnMark.MouseButton1Click:Connect(markBestBrainrot)
+--==================== Handlers (protegidos por validación) ====================--
+btnMark.MouseButton1Click:Connect(function()
+    if not __KEY_VALIDATED__ then return end
+    markBestBrainrot()
+end)
 
 btnPlatform.MouseButton1Click:Connect(function()
+    if not __KEY_VALIDATED__ then return end
     if platformState == "none" then
         startPlatform()
     elseif platformState == "moving" then
@@ -606,50 +701,105 @@ btnPlatform.MouseButton1Click:Connect(function()
 end)
 
 btnDesync.MouseButton1Click:Connect(function()
+    if not __KEY_VALIDATED__ then return end
     desyncActive = not desyncActive
     if desyncActive then
         local success = enableMobileDesync()
         if success then
-            btnDesync.BackgroundColor3 = Color3.fromRGB(255, 215, 0) -- Amarillo dorado
+            btnDesync.BackgroundColor3 = Color3.fromRGB(255, 215, 0)
             btnDesync.Text = "DESYNC ACTIVADO"
             desyncGradient.Enabled = false
         else
             desyncActive = false
-            btnDesync.BackgroundColor3 = Color3.fromRGB(140, 90, 220) -- Morado (original)
+            btnDesync.BackgroundColor3 = Color3.fromRGB(140, 90, 220)
             btnDesync.Text = "ACTIVAR DESYNC"
             desyncGradient.Enabled = true
         end
     else
         disableMobileDesync()
-        btnDesync.BackgroundColor3 = Color3.fromRGB(140, 90, 220) -- Morado (original)
+        btnDesync.BackgroundColor3 = Color3.fromRGB(140, 90, 220)
         btnDesync.Text = "ACTIVAR DESYNC"
         desyncGradient.Enabled = true
     end
 end)
 
+local uiOpen = true
+local function setUI(open) uiOpen = open; frame.Visible = open end
+toggleUI.MouseButton1Click:Connect(function() setUI(not uiOpen) end)
+
+local function toggleInterface()
+    if isMinimized then
+        frame:TweenSize(UDim2.new(0, 260, 0, 228), "Out", "Quart", 0.25, true)
+        toggleBtn.Text = "−"
+        if __KEY_VALIDATED__ then
+            statusFrame.Visible, btnMark.Visible, btnPlatform.Visible, btnDesync.Visible = true, true, true, true
+        else
+            -- en modo no validado, solo validación visible
+            statusFrame.Visible = false
+        end
+    else
+        frame:TweenSize(UDim2.new(0, 260, 0, 44), "Out", "Quart", 0.25, true)
+        toggleBtn.Text = "+"
+        statusFrame.Visible, btnMark.Visible, btnPlatform.Visible, btnDesync.Visible = false, false, false, false
+    end
+    isMinimized = not isMinimized
+end
+toggleBtn.MouseButton1Click:Connect(toggleInterface)
+
 close.MouseButton1Click:Connect(function()
     if currentMarker then currentMarker:Destroy(); currentMarker = nil end
     deletePlatform()
-    cleanupSCPEffects() -- Desactiva el SCP al cerrar
-    disableMobileDesync() -- Desactiva el desync al cerrar
+    cleanupSCPEffects()
+    disableMobileDesync()
     gui:Destroy()
 end)
 
--- Iniciar el efecto SCP automáticamente al cargar el script
-startSCPEffects()
-print("Brainrot Scanner: HEAD_CLEARANCE=1.6 (para no chocar), SCP activado automáticamente.")
+--==================== VALIDACIÓN: habilita todo al aprobar ====================--
+local reasons = {
+    missing_code   = "Escribe una key.",
+    network_error  = "Error de red.",
+    bad_json       = "Respuesta inválida.",
+    not_found      = "Key no encontrada.",
+    inactive       = "Key inactiva.",
+    no_expiry_date = "Key sin fecha.",
+    expired        = "Key expirada.",
+    bad_expiry_format = "Fecha inválida."
+}
 
----
--- Fix para el problema del Brainrot y Desync
--- Detecta si el personaje se reinicia y reactiva/desactiva cosas
+valBtn.MouseButton1Click:Connect(function()
+    valStatus.Text = "Validando..."
+    local ok, info = validateKeyByDocId((valBox.Text or ""):gsub("^%s+",""):gsub("%s+$",""))
+    if ok then
+        __KEY_VALIDATED__ = true
+        -- Ocultar controles de validación
+        valBox:Destroy(); valBtn:Destroy(); valStatus:Destroy()
+        -- Mostrar tus controles
+        statusFrame.Visible = true
+        btnMark.Visible = true
+        btnPlatform.Visible = true
+        btnDesync.Visible = true
+        status.Text = "Listo para buscar..."
+        -- Activar cámara y SCP recién ahora
+        enableInvisicam()
+        startSCPEffects()
+        print(">>> HABILITADO. Key válida. Expira:", info.expiresAt, "TTL(s):", info.ttl)
+    else
+        valStatus.Text = "❌ ".. (reasons[info] or tostring(info))
+    end
+end)
+
+--==================== Reset de personaje (mantener estados) ====================--
 player.CharacterAdded:Connect(function(newCharacter)
     character = newCharacter
-    -- Si la plataforma estaba activa, la reinicia
-    if platformState ~= "none" then
-        deletePlatform() -- Limpia la plataforma anterior
-        startPlatform()  -- Inicia una nueva
+    if not __KEY_VALIDATED__ then
+        -- sin validación, nada que reactivar
+        return
     end
-    -- Desactiva el Desync si el personaje muere
+    -- si la plataforma estaba activa, se gestiona
+    if platformState ~= "none" then
+        deletePlatform()
+        startPlatform()
+    end
     if desyncActive then
         desyncActive = false
         disableMobileDesync()
